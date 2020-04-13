@@ -6,3 +6,6 @@ src/model/
 src/logs/
 src/sample/
 src/test
+*.png
+*events.out.tfevents*
+*.log

@@ -27,6 +27,8 @@ parser.add_argument('--weight_decay', dest='weight_decay', default=1e-4, type=fl
 parser.add_argument('--epoch', dest='epoch', default=600, type=int, help='number of epochs, default: 600')
 parser.add_argument('--print_freq', dest='print_freq', default=100, type=int, help='print frequency for loss information, default: 100')
 parser.add_argument('--load_model', dest='load_model', default=None, help='folder of saved model that you wish to continue training, (e.g., 20190411-2217), default: None')
+parser.add_argument('--starting_model', dest='starting_model', default='0', help='starting model id of the training')
+parser.add_argument('--num_cross_vals', dest='num_cross_vals', default='6', help='num_cross_vals have to bigger than 3 (train dataset, validation dataset, and test dataset)')
 args = parser.parse_args()
 
 logger = logging.getLogger(__name__)  # logger
@@ -36,6 +38,10 @@ logger.setLevel(logging.INFO)
 def init_logger(log_dir):
     formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
     # file handler
+    try:
+        os.stat(log_dir)
+    except:
+        os.mkdir(log_dir)
     file_handler = logging.FileHandler(os.path.join(log_dir, 'main.log'))
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
@@ -107,18 +113,19 @@ def main():
     sess = tf.Session(config=run_config)
 
     # Initialize model and solver
-    num_cross_vals = 6  # num_cross_vals have to bigger than 3 (train dataset, validation dataset, and test dataset)
+    num_cross_vals = int(args.num_cross_vals)
     model = Model(args, name='UNet', input_dims=(256, 256, 1), output_dims=(256, 256, 1), log_path=log_dir)
     solver = Solver(sess, model)
 
+    starting_model=int(args.starting_model)
     if args.is_train:
-        train(num_cross_vals, model_dir, sample_dir, log_dir, solver)
+        train(num_cross_vals, model_dir, sample_dir, log_dir, solver, starting_model)
     else:
         test(num_cross_vals, model_dir, test_dir, solver)
 
 
-def train(num_cross_vals, model_dir, sample_dir, log_dir, solver):
-    for model_id in range(num_cross_vals):
+def train(num_cross_vals, model_dir, sample_dir, log_dir, solver, model_id):
+    while (model_id < num_cross_vals):
         model_sub_dir = os.path.join(model_dir, 'model' + str(model_id))
         sample_sub_dir = os.path.join(sample_dir, 'model' + str(model_id))
         log_sub_dir = os.path.join(log_dir, 'model' + str(model_id))
@@ -140,33 +147,46 @@ def train(num_cross_vals, model_dir, sample_dir, log_dir, solver):
 
         epoch_time = 0
         num_iters = int(args.epoch * data.num_train / args.batch_size)
-        for iter_time in range(num_iters):
-            mrImgs, ctImgs, maskImgs = data.train_batch(batch_size=args.batch_size)
-            _, total_loss, data_loss, reg_term, mrImgs_, preds, ctImgs_, summary = solver.train(mrImgs, ctImgs)
-            tb_writer.add_summary(summary, iter_time)
-            tb_writer.flush()
+        iter_time = 0
+        while (iter_time < num_iters):
+            if (iter_time == 0):
+                logger.info(' Searching for restore point in {}'.format(model_sub_dir))
+                ckpt = tf.train.get_checkpoint_state(model_sub_dir)
+                if ckpt and ckpt.model_checkpoint_path:
+                    ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
+                    saver.restore(solver.sess, os.path.join(model_sub_dir, ckpt_name))
+                    logger.info(' [*] Reading model: {} restored point {} iter_time {}'.format(
+                        model_id, model_sub_dir, ckpt_name, ckpt_name.split("-")[1]))
+                    iter_time = int(ckpt_name.split("-")[1])
+            else:
+                mrImgs, ctImgs, maskImgs = data.train_batch(batch_size=args.batch_size)
+                _, total_loss, data_loss, reg_term, mrImgs_, preds, ctImgs_, summary = solver.train(mrImgs, ctImgs)
+                tb_writer.add_summary(summary, iter_time)
+                tb_writer.flush()
 
-            if np.mod(iter_time, args.print_freq) == 0:
-                print('Model id: {}, {} / {} Total Loss: {:.3f}, Data Loss: {:.3f}, Reg Term: {:.3f}'.format(
-                    model_id, iter_time, num_iters, total_loss, data_loss, reg_term))
+                if np.mod(iter_time, args.print_freq) == 0:
+                    print('Model id: {}, {} / {} Total Loss: {:.3f}, Data Loss: {:.3f}, Reg Term: {:.3f}'.format(
+                        model_id, iter_time, num_iters, total_loss, data_loss, reg_term))
 
-            if (np.mod(iter_time + 1, int(data.num_train / args.batch_size)) == 0) or (iter_time + 1 == num_iters):
-                epoch_time += 1
+                if (np.mod(iter_time + 1, int(data.num_train / args.batch_size)) == 0) or (iter_time + 1 == num_iters):
+                    epoch_time += 1
 
-                mrImgs, ctImgs, maskImgs = data.val_batch()
-                preds = solver.test(mrImgs, batch_size=args.batch_size)
-                mae, summary = solver.evaluate(ctImgs, preds, maskImgs, is_train=True)
-                print('Epoch: {}, MAE: {:.3f}, Best MAE: {:.3f}'.format(epoch_time, mae, best_mae))
+                    mrImgs, ctImgs, maskImgs = data.val_batch()
+                    preds = solver.test(mrImgs, batch_size=args.batch_size)
+                    mae, summary = solver.evaluate(ctImgs, preds, maskImgs, is_train=True)
+                    print('Epoch: {}, MAE: {:.3f}, Best MAE: {:.3f}'.format(epoch_time, mae, best_mae))
 
-                # write to tensorbaord
-                tb_writer.add_summary(summary, epoch_time)
+                    # write to tensorbaord
+                    tb_writer.add_summary(summary, epoch_time)
 
-                # Save validation results
-                solver.save_imgs(mrImgs, ctImgs, preds, maskImgs, iter_time, save_folder=sample_sub_dir)
+                    # Save validation results
+                    solver.save_imgs(mrImgs, ctImgs, preds, maskImgs, iter_time, save_folder=sample_sub_dir)
 
-                if mae < best_mae:
-                    best_mae = mae
-                    save_model(saver, solver, model_sub_dir, model_id, iter_time)
+                    if mae < best_mae:
+                        best_mae = mae
+                        save_model(saver, solver, model_sub_dir, model_id, iter_time)
+            iter_time = iter_time + 1
+    model_id = model_id + 1
 
 
 def test(num_cross_vals, model_dir, test_dir, solver):

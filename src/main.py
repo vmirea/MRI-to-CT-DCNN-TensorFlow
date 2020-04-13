@@ -41,7 +41,7 @@ def init_logger(log_dir):
     try:
         os.stat(log_dir)
     except:
-        os.mkdir(log_dir)
+        os.makedirs(log_dir, exist_ok=True)
     file_handler = logging.FileHandler(os.path.join(log_dir, 'main.log'))
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
